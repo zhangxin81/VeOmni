@@ -20,6 +20,10 @@ MODEL_CONFIGS = {
         "config_path": "tests/toy_config/deepseek_v3_toy/config.json",
         "tokenizer_path": "deepseek-ai/DeepSeek-V3",
     },
+    "deepseek_v4": {
+        "config_path": "tests/toy_config/deepseek_v4_toy/config.json",
+        "tokenizer_path": "deepseek-ai/DeepSeek-V4-Flash-Base",
+    },
 }
 
 

@@ -269,13 +269,17 @@ def _init_parameter(
 
 def _convert_weight_key(key: str, model: "PreTrainedModel") -> str:
     """
-    Convert a single state dict key using the model's checkpoint conversion mapping.
+    Convert a single state dict key using model-registered checkpoint key hooks.
 
-    For example, in the InternVL, we have _checkpoint_conversion_mapping = {"^model": "language_model"}
-
-    This is to adapt to the big breaking change introduced in HF transformers 4.52:
-    https://github.com/huggingface/transformers/pull/38385
+    Models with v5 ``WeightRenaming``/``WeightConverter`` recipes that VeOmni's
+    streaming loader cannot apply directly may register
+    ``_convert_checkpoint_tensor_key(key, model)``. Simpler legacy regex mappings
+    can still use ``_checkpoint_conversion_mapping``.
     """
+    converter = getattr(model, "_convert_checkpoint_tensor_key", None)
+    if callable(converter):
+        return converter(key, model)
+
     if not hasattr(model, "_checkpoint_conversion_mapping"):
         return key
 

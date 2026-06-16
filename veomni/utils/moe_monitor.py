@@ -143,6 +143,8 @@ def register_external_record_router(class_name: str) -> None:
 
 
 register_external_record_router("DeepseekV3TopkRouter")
+register_external_record_router("DeepseekV4HashRouter")
+register_external_record_router("DeepseekV4TopKRouter")
 
 
 def record_router_indices(router_module: nn.Module, indices: torch.Tensor) -> None:

@@ -417,6 +417,13 @@ def test_record_router_indices_noop_when_paused_or_inactive():
         set_active_monitor(None)
 
 
+def test_deepseek_external_record_routers_registered():
+    """DeepSeek V3/V4 patched MoE blocks record indices explicitly."""
+    assert "DeepseekV3TopkRouter" in EXTERNAL_RECORD_ROUTERS
+    assert "DeepseekV4HashRouter" in EXTERNAL_RECORD_ROUTERS
+    assert "DeepseekV4TopKRouter" in EXTERNAL_RECORD_ROUTERS
+
+
 def test_register_external_record_router_is_idempotent():
     """Registering the same class twice must not break anything."""
     before = len(EXTERNAL_RECORD_ROUTERS)

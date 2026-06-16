@@ -11,7 +11,7 @@ Models under ``veomni/models/transformers/`` that register a patchgen-generated
 class (``transformers-stable`` default group in ``pyproject.toml`` pins
 ``transformers==5.9.0``):
 
-- Causal-LM (text-only):           qwen2, qwen3, qwen3_moe, deepseek_v3
+- Causal-LM (text-only):           qwen2, qwen3, qwen3_moe, deepseek_v3, deepseek_v4
 - VLM via text-only sub-config
   (``*ForCausalLM`` registered):   qwen3_5, qwen3_5_moe
 - VLM full forward (image + text): qwen2_vl, qwen2_5_vl, qwen3_vl, qwen3_vl_moe,
@@ -157,6 +157,7 @@ CASES = [
     # the OpSlot-guarded cross-entropy, and the v5 ``gate_up_proj`` layout
     # end-to-end.
     Case("deepseek_v3-eager", _toy("deepseek_v3_toy"), "DeepseekV3ForCausalLM", "causal_lm"),
+    Case("deepseek_v4-eager", _toy("deepseek_v4_toy"), "DeepseekV4ForCausalLM", "causal_lm"),
     # ── GLM-MoE-DSA (MLA + Dynamic Sparse Attention) ─────────────────────
     # Upstream sets ``_supports_flash_attn = False``, so FA2 is not an
     # option here — we use eager+fp32 as the RNG-init baseline and

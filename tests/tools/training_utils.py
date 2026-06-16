@@ -42,6 +42,12 @@ _NPU_PER_MODEL_OVERRIDES: Dict[str, Dict[str, str]] = {
         "rms_norm_implementation": "eager",
         "rotary_pos_emb_implementation": "eager",
     },
+    "deepseek_v4": {
+        # DeepSeek-V4 uses partial/interleaved RoPE with compressor-specific
+        # semantics; keep generic RMSNorm/RoPE OpSlots eager on NPU.
+        "rms_norm_implementation": "eager",
+        "rotary_pos_emb_implementation": "eager",
+    },
     # Multimodal RoPE has no NPU backend in the Qwen-VL family.
     "qwen2vl": {"rotary_pos_emb_implementation": "eager"},
     "qwen25vl": {"rotary_pos_emb_implementation": "eager"},

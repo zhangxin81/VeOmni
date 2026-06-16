@@ -148,7 +148,7 @@ Additional per-directory helpers:
 | Liger kernel | `True`, `False` (VeOmni only) |
 
 **Models covered**:
-- Text / MoE: llama3_1, qwen2, qwen3_5, qwen3_5_moe, seed_oss, deepseek_v3
+- Text / MoE: llama3_1, qwen2, qwen3_5, qwen3_5_moe, seed_oss, deepseek_v3, deepseek_v4
 - VLM: qwen2_vl, qwen2_5_vl, qwen3_vl, qwen3_vl_moe
 - Omni: qwen2_5_omni, qwen3_omni_moe
 

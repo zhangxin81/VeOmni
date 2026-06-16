@@ -30,6 +30,12 @@ from veomni.models.checkpoint_tensor_loading import (
     get_checkpoint_tensor_converter,
     maybe_convert_checkpoint_tensor,
 )
+from veomni.models.transformers.deepseek_v4.checkpoint_tensor_converter import (
+    DeepseekV4CheckpointTensorConverter,
+    convert_deepseek_v4_checkpoint_tensor_key,
+    convert_deepseek_v4_fqn_to_index_mapping,
+    create_deepseek_v4_checkpoint_tensor_converter,
+)
 from veomni.models.transformers.qwen3_moe.checkpoint_tensor_converter import (
     Qwen3MoeCheckpointTensorConverter,
     create_qwen3_moe_checkpoint_tensor_converter,
@@ -798,3 +804,191 @@ class TestQwen3OmniMoeConverterIntegration:
         assert down_res is not None and torch.equal(down_res.tensor, down)
         # Nothing was buffered.
         assert converter.finalize() == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for DeepseekV4CheckpointTensorConverter
+# ---------------------------------------------------------------------------
+
+
+DSV4_NUM_EXPERTS = 4
+DSV4_HIDDEN = 8
+DSV4_INTERMEDIATE = 6
+
+
+def _dsv4_per_expert_key(prefix: str, expert_id: int, proj: str) -> str:
+    return f"{prefix}.experts.{expert_id}.{proj}.weight"
+
+
+def _dsv4_per_expert_tensors(prefix: str = "model.layers.0.mlp", use_v4_names: bool = True):
+    """Generate per-expert tensors using either V4 w1/w2/w3 or standard names."""
+    gate_name, up_name, down_name = ("w1", "w3", "w2") if use_v4_names else ("gate_proj", "up_proj", "down_proj")
+    tensors = {}
+    for e in range(DSV4_NUM_EXPERTS):
+        tensors[_dsv4_per_expert_key(prefix, e, gate_name)] = torch.full((DSV4_INTERMEDIATE, DSV4_HIDDEN), 100.0 + e)
+        tensors[_dsv4_per_expert_key(prefix, e, up_name)] = torch.full((DSV4_INTERMEDIATE, DSV4_HIDDEN), 200.0 + e)
+        tensors[_dsv4_per_expert_key(prefix, e, down_name)] = torch.full((DSV4_HIDDEN, DSV4_INTERMEDIATE), 300.0 + e)
+    return tensors
+
+
+class TestDeepseekV4ConverterCanHandle:
+    def setup_method(self):
+        self.converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+
+    def test_matches_v4_and_standard_expert_keys(self):
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.w1.weight")
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.w2.weight")
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.w3.weight")
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.gate_proj.weight")
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.up_proj.weight")
+        assert self.converter.can_handle("model.layers.0.mlp.experts.0.down_proj.weight")
+
+    def test_rejects_fused_and_non_expert_keys(self):
+        assert not self.converter.can_handle("model.layers.0.mlp.experts.gate_up_proj")
+        assert not self.converter.can_handle("model.layers.0.mlp.experts.down_proj")
+        assert not self.converter.can_handle("model.layers.0.self_attn.q_a_proj.weight")
+
+
+class TestDeepseekV4ConverterConvert:
+    def test_v4_w1_w3_merge_to_gate_up(self):
+        converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+        prefix = "model.layers.0.mlp"
+        tensors = _dsv4_per_expert_tensors(prefix, use_v4_names=True)
+        emitted = []
+        for key, tensor in tensors.items():
+            result = converter.convert(key, tensor)
+            if result is not None:
+                emitted.append(result)
+
+        names = {result.name for result in emitted}
+        assert names == {f"{prefix}.experts.gate_up_proj", f"{prefix}.experts.down_proj"}
+        gate_up = next(result.tensor for result in emitted if result.name.endswith("gate_up_proj"))
+        down = next(result.tensor for result in emitted if result.name.endswith("down_proj"))
+        assert gate_up.shape == (DSV4_NUM_EXPERTS, 2 * DSV4_INTERMEDIATE, DSV4_HIDDEN)
+        assert down.shape == (DSV4_NUM_EXPERTS, DSV4_HIDDEN, DSV4_INTERMEDIATE)
+        for e in range(DSV4_NUM_EXPERTS):
+            assert torch.equal(gate_up[e, :DSV4_INTERMEDIATE], torch.full((DSV4_INTERMEDIATE, DSV4_HIDDEN), 100.0 + e))
+            assert torch.equal(gate_up[e, DSV4_INTERMEDIATE:], torch.full((DSV4_INTERMEDIATE, DSV4_HIDDEN), 200.0 + e))
+            assert torch.equal(down[e], torch.full((DSV4_HIDDEN, DSV4_INTERMEDIATE), 300.0 + e))
+
+    def test_standard_gate_up_names_are_also_supported(self):
+        converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+        prefix = "model.layers.0.mlp"
+        emitted = []
+        for key, tensor in _dsv4_per_expert_tensors(prefix, use_v4_names=False).items():
+            result = converter.convert(key, tensor)
+            if result is not None:
+                emitted.append(result)
+        assert {result.name for result in emitted} == {
+            f"{prefix}.experts.gate_up_proj",
+            f"{prefix}.experts.down_proj",
+        }
+
+
+class TestDeepseekV4ConverterFinalize:
+    def test_finalize_noop_when_all_flushed(self):
+        converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+        for key, tensor in _dsv4_per_expert_tensors().items():
+            converter.convert(key, tensor)
+        assert converter.finalize() == []
+
+    def test_finalize_raises_on_incomplete_checkpoint(self):
+        converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+        converter.convert("model.layers.0.mlp.experts.0.w1.weight", torch.randn(DSV4_INTERMEDIATE, DSV4_HIDDEN))
+        with pytest.raises(RuntimeError, match="incomplete checkpoint"):
+            converter.finalize()
+
+
+class TestDeepseekV4ConverterFactory:
+    def test_factory_uses_n_routed_experts(self):
+        model = SimpleNamespace(config=SimpleNamespace(n_routed_experts=DSV4_NUM_EXPERTS))
+        converter = create_deepseek_v4_checkpoint_tensor_converter(model)
+        assert isinstance(converter, DeepseekV4CheckpointTensorConverter)
+        assert converter.num_experts == DSV4_NUM_EXPERTS
+
+
+class TestDeepseekV4ConverterIntegration:
+    def test_full_layer_conversion_and_fused_passthrough(self):
+        converter = DeepseekV4CheckpointTensorConverter(num_experts=DSV4_NUM_EXPERTS)
+        prefix = "model.layers.0.mlp"
+        dispatched = {}
+
+        passthrough = torch.randn(2, 2)
+        result = maybe_convert_checkpoint_tensor("model.layers.0.self_attn.q_a_proj.weight", passthrough, converter)
+        assert result is not None and result.name == "model.layers.0.self_attn.q_a_proj.weight"
+        dispatched[result.name] = result.tensor
+
+        for key, tensor in _dsv4_per_expert_tensors(prefix).items():
+            result = maybe_convert_checkpoint_tensor(key, tensor, converter)
+            if result is not None:
+                dispatched[result.name] = result.tensor
+
+        assert converter.finalize() == []
+        assert dispatched[f"{prefix}.experts.gate_up_proj"].shape == (
+            DSV4_NUM_EXPERTS,
+            2 * DSV4_INTERMEDIATE,
+            DSV4_HIDDEN,
+        )
+        assert dispatched[f"{prefix}.experts.down_proj"].shape == (
+            DSV4_NUM_EXPERTS,
+            DSV4_HIDDEN,
+            DSV4_INTERMEDIATE,
+        )
+
+        gate_up = torch.randn(DSV4_NUM_EXPERTS, 2 * DSV4_INTERMEDIATE, DSV4_HIDDEN)
+        down = torch.randn(DSV4_NUM_EXPERTS, DSV4_HIDDEN, DSV4_INTERMEDIATE)
+        gate_up_res = maybe_convert_checkpoint_tensor(f"{prefix}.experts.gate_up_proj", gate_up, converter)
+        down_res = maybe_convert_checkpoint_tensor(f"{prefix}.experts.down_proj", down, converter)
+        assert gate_up_res is not None and torch.equal(gate_up_res.tensor, gate_up)
+        assert down_res is not None and torch.equal(down_res.tensor, down)
+
+    def test_checkpoint_tensor_key_hook_applies_static_v4_renames(self):
+        model_keys = {
+            "model.embed_tokens.weight": torch.empty(0),
+            "lm_head.weight": torch.empty(0),
+            "model.norm.weight": torch.empty(0),
+            "model.layers.1.self_attn.q_a_proj.weight": torch.empty(0),
+            "model.layers.1.self_attn.compressor.indexer.kv_proj.weight": torch.empty(0),
+            "model.layers.1.mlp.shared_experts.gate_proj.weight": torch.empty(0),
+        }
+        model = SimpleNamespace(base_model_prefix="model", state_dict=lambda: model_keys)
+
+        assert convert_deepseek_v4_checkpoint_tensor_key("embed.weight", model) == "model.embed_tokens.weight"
+        assert convert_deepseek_v4_checkpoint_tensor_key("head.weight", model) == "lm_head.weight"
+        assert convert_deepseek_v4_checkpoint_tensor_key("norm.weight", model) == "model.norm.weight"
+        assert (
+            convert_deepseek_v4_checkpoint_tensor_key("layers.1.attn.wq_a.weight", model)
+            == "model.layers.1.self_attn.q_a_proj.weight"
+        )
+        assert (
+            convert_deepseek_v4_checkpoint_tensor_key("layers.1.attn.indexer.compressor.wkv.weight", model)
+            == "model.layers.1.self_attn.compressor.indexer.kv_proj.weight"
+        )
+        assert (
+            convert_deepseek_v4_checkpoint_tensor_key("layers.1.ffn.shared_experts.w1.weight", model)
+            == "model.layers.1.mlp.shared_experts.gate_proj.weight"
+        )
+        assert (
+            convert_deepseek_v4_checkpoint_tensor_key("layers.1.ffn.experts.0.w1.weight", model)
+            == "model.layers.1.mlp.experts.0.w1.weight"
+        )
+
+    def test_fqn_to_index_mapping_accepts_public_and_modeling_v4_names(self):
+        mapping = {
+            "layers.0.ffn.experts.0.w1.weight": 3,
+            "layers.0.ffn.experts.0.w3.weight": 4,
+            "layers.0.ffn.experts.1.w2.weight": 5,
+            "embed.weight": 0,
+            "head.weight": 1,
+            "norm.weight": 2,
+            "model.layers.1.mlp.experts.0.w1.weight": 6,
+            "model.layers.1.mlp.experts.1.w2.weight": 7,
+        }
+        converted = convert_deepseek_v4_fqn_to_index_mapping(mapping)
+        assert converted["model.layers.0.mlp.experts.gate_up_proj"] == 3
+        assert converted["model.layers.0.mlp.experts.down_proj"] == 5
+        assert converted["model.embed_tokens.weight"] == 0
+        assert converted["lm_head.weight"] == 1
+        assert converted["model.norm.weight"] == 2
+        assert converted["model.layers.1.mlp.experts.gate_up_proj"] == 6
+        assert converted["model.layers.1.mlp.experts.down_proj"] == 7

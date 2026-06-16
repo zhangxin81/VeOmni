@@ -49,9 +49,15 @@ class MoERouterMonitorCallback(Callback):
             return
 
         config = self.trainer.model_config
-        if not hasattr(config, "num_experts"):
+        num_experts = getattr(
+            config,
+            "num_experts",
+            getattr(config, "n_routed_experts", getattr(config, "num_local_experts", None)),
+        )
+        if num_experts is None:
             logger.warning_rank0(
-                "moe_load_balance_monitor_interval > 0 but model config has no 'num_experts'. "
+                "moe_load_balance_monitor_interval > 0 but model config has no expert-count field "
+                "('num_experts', 'n_routed_experts', or 'num_local_experts'). "
                 "MoE router monitor not activated."
             )
             return
@@ -60,11 +66,11 @@ class MoERouterMonitorCallback(Callback):
 
         # Process groups are read lazily in on_train_begin once the device
         # mesh is guaranteed to be initialized.
-        self.monitor = MoERouterMonitor(num_experts=config.num_experts)
+        self.monitor = MoERouterMonitor(num_experts=num_experts)
         set_active_monitor(self.monitor)
         ps = get_parallel_state()
         logger.info_rank0(
-            f"MoE router monitor created: num_experts={config.num_experts}, "
+            f"MoE router monitor created: num_experts={num_experts}, "
             f"interval={args.train.moe_load_balance_monitor_interval}, "
             f"ep_size={ps.ep_size if ps.ep_enabled else 1}"
         )
